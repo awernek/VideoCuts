@@ -12,12 +12,15 @@ public class OllamaEngagingMomentsOptions
     /// <summary>Base URL da API Ollama (ex.: http://localhost:11434).</summary>
     public string BaseUrl { get; set; } = "http://localhost:11434";
 
-    /// <summary>Modelo a usar (ex.: llama3).</summary>
-    public string Model { get; set; } = "llama3";
+    /// <summary>Modelo Ollama (ex.: llama3.1:8b; instale com ollama pull llama3.1:8b).</summary>
+    public string Model { get; set; } = "llama3.1:8b";
 
     /// <summary>Número de tentativas adicionais em caso de falha (0 = só uma chamada).</summary>
     public int RetryCount { get; set; } = 2;
 
     /// <summary>Delay em ms entre tentativas de retry.</summary>
     public int RetryDelayMs { get; set; } = 1000;
+
+    /// <summary>Tamanho máximo de transcrição por chunk em caracteres (0 = não dividir; padrão 12000 para vídeos longos).</summary>
+    public int ChunkMaxCharacters { get; set; } = 12_000;
 }

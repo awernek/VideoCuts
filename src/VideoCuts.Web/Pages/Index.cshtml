@@ -1,0 +1,208 @@
+@page
+@model VideoCuts.Web.Pages.IndexModel
+@{
+    ViewData["Title"] = "VideoCuts – Gerar clipes";
+}
+<div class="container">
+    <h1>VideoCuts</h1>
+    <p class="lead">Informe a URL do vídeo ou o caminho local e as opções para gerar clipes.</p>
+
+    <form id="runForm" class="form">
+        <div class="field">
+            <label for="videoUrl">URL do vídeo (YouTube ou HTTP)</label>
+            <input type="url" id="videoUrl" name="videoUrl" placeholder="https://..." />
+        </div>
+        <div class="field">
+            <label for="localPath">Ou caminho local do arquivo</label>
+            <input type="text" id="localPath" name="localPath" placeholder="C:\videos\arquivo.mp4" />
+        </div>
+        <div class="field">
+            <label>
+                <input type="checkbox" id="useLocalWhisper" name="useLocalWhisper" checked />
+                Transcrição local (Whisper)
+            </label>
+            <span class="hint">Com isso + Ollama você não precisa de OPENAI_API_KEY.</span>
+        </div>
+        <div class="field" id="whisperPathGroup">
+            <label>Modelo Whisper</label>
+            <select id="whisperSource" name="whisperSource">
+                <option value="appsettings">Usar do appsettings</option>
+                <option value="custom">Outro caminho</option>
+            </select>
+            @if (!string.IsNullOrEmpty(Model.WhisperModelPathFromSettings))
+            {
+                <span class="hint" id="appsettingsPath">@Model.WhisperModelPathFromSettings</span>
+            }
+            <input type="text" id="whisperPathOverride" name="whisperPathOverride" placeholder="Caminho do modelo (ex.: ggml-base.bin)" style="display:none;" />
+        </div>
+        <div class="field">
+            <label>
+                <input type="checkbox" id="useOllama" name="useOllama" checked />
+                Usar Ollama para cortes
+            </label>
+        </div>
+        <div class="field">
+            <label>
+                <input type="checkbox" id="useOllamaFallback" name="useOllamaFallback" />
+                Ollama com fallback para OpenAI (exige OPENAI_API_KEY)
+            </label>
+        </div>
+        <div class="field">
+            <label for="outputDirectory">Pasta de saída (opcional)</label>
+            <input type="text" id="outputDirectory" name="outputDirectory" placeholder="./clips" />
+        </div>
+        <div class="field">
+            <label for="maxClips">Máximo de clipes (vazio = todos)</label>
+            <input type="number" id="maxClips" name="maxClips" min="1" placeholder="10" />
+        </div>
+        <div class="field">
+            <label>
+                <input type="checkbox" id="convertToVertical" name="convertToVertical" checked />
+                Converter clipes para vertical (9:16)
+            </label>
+        </div>
+        <button type="submit" id="btnRun">Gerar clipes</button>
+    </form>
+
+    <div id="jobState" class="status job-state">
+        <p><strong>Job:</strong> <span id="jobStateText">Nenhum job em execução.</span></p>
+        <p class="hint">Apenas um job por vez nesta instância. Se você rodar a aplicação em dois lugares (ex.: Visual Studio e terminal), cada um é uma instância e tem seu próprio job; o status acima é só desta aba/servidor.</p>
+    </div>
+    <div id="status" class="status" style="display:none;">
+        <p><strong>Status:</strong> <span id="statusText"></span></p>
+        <p id="errorText" class="error" style="display:none;"></p>
+        <div id="clipList" class="clip-list"></div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    const form = document.getElementById('runForm');
+    const status = document.getElementById('status');
+    const statusText = document.getElementById('statusText');
+    const errorText = document.getElementById('errorText');
+    const clipList = document.getElementById('clipList');
+    const btnRun = document.getElementById('btnRun');
+    const jobStateText = document.getElementById('jobStateText');
+    const whisperSource = document.getElementById('whisperSource');
+    const whisperPathOverride = document.getElementById('whisperPathOverride');
+
+    function updateJobStateLabel(state, message) {
+        if (state === 'Running') {
+            jobStateText.textContent = 'Em execução (aguarde…).';
+            jobStateText.classList.add('running');
+        } else if (state === 'Completed') {
+            jobStateText.textContent = 'Nenhum job em execução. (Último: concluído.)';
+            jobStateText.classList.remove('running');
+        } else if (state === 'Failed') {
+            jobStateText.textContent = 'Nenhum job em execução. (Último: falhou.)';
+            jobStateText.classList.remove('running');
+        } else {
+            jobStateText.textContent = 'Nenhum job em execução.';
+            jobStateText.classList.remove('running');
+        }
+    }
+
+    function pollStatus(onProgress) {
+        fetch('/api/job/status')
+            .then(r => r.json())
+            .then(data => {
+                updateJobStateLabel(data.state, data.message);
+                if (onProgress) onProgress(data);
+            })
+            .catch(() => { if (onProgress) onProgress({ state: 'Idle' }); });
+    }
+
+    // Ao carregar a página, mostra se já existe job em execução (ex.: outra aba ou outra instância do servidor)
+    pollStatus();
+
+    whisperSource.addEventListener('change', function () {
+        whisperPathOverride.style.display = this.value === 'custom' ? 'block' : 'none';
+    });
+
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const videoUrl = document.getElementById('videoUrl').value.trim() || null;
+        const localPath = document.getElementById('localPath').value.trim() || null;
+        if (!videoUrl && !localPath) {
+            alert('Informe a URL do vídeo ou o caminho local do arquivo.');
+            return;
+        }
+        const useLocalWhisper = document.getElementById('useLocalWhisper').checked;
+        const whisperPath = whisperSource.value === 'custom' ? (whisperPathOverride.value.trim() || null) : null;
+        const payload = {
+            videoUrl: videoUrl,
+            localPath: localPath,
+            useLocalWhisper: useLocalWhisper,
+            whisperPathOverride: whisperPath,
+            useOllama: document.getElementById('useOllama').checked,
+            useOllamaFallback: document.getElementById('useOllamaFallback').checked,
+            outputDirectory: document.getElementById('outputDirectory').value.trim() || null,
+            maxClips: document.getElementById('maxClips').value ? parseInt(document.getElementById('maxClips').value, 10) : null,
+            convertToVertical: document.getElementById('convertToVertical').checked
+        };
+        btnRun.disabled = true;
+        status.style.display = 'block';
+        statusText.textContent = 'Iniciando...';
+        errorText.style.display = 'none';
+        clipList.innerHTML = '';
+        updateJobStateLabel('Running', '');
+        try {
+            const res = await fetch('/api/job/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) throw new Error('Falha ao iniciar o job.');
+            const interval = setInterval(function () {
+                pollStatus(function (data) {
+                    statusText.textContent = data.message || data.state || '';
+                    if (data.state === 'Completed' || data.state === 'Failed') {
+                        clearInterval(interval);
+                        btnRun.disabled = false;
+                        if (data.state === 'Failed') {
+                            errorText.textContent = data.errorMessage || data.message || 'Erro.';
+                            errorText.style.display = 'block';
+                        }
+                        if (data.clipDetails && data.clipDetails.length) {
+                            data.clipDetails.forEach(function (clip, i) {
+                                const block = document.createElement('div');
+                                block.className = 'clip-block';
+                                const pathEl = document.createElement('div');
+                                pathEl.className = 'clip-path';
+                                pathEl.textContent = (i + 1) + '. ' + (clip.path || '');
+                                const transEl = document.createElement('div');
+                                transEl.className = 'clip-transcript';
+                                transEl.textContent = clip.transcript || '(sem transcrição para este trecho)';
+                                block.appendChild(pathEl);
+                                block.appendChild(transEl);
+                                clipList.appendChild(block);
+                            });
+                        } else if (data.clipPaths && data.clipPaths.length) {
+                            data.clipPaths.forEach(function (path) {
+                                const block = document.createElement('div');
+                                block.className = 'clip-block';
+                                const pathEl = document.createElement('div');
+                                pathEl.className = 'clip-path';
+                                pathEl.textContent = path;
+                                block.appendChild(pathEl);
+                                clipList.appendChild(block);
+                            });
+                        } else if (data.state === 'Completed') {
+                            statusText.textContent = 'Concluído, mas nenhum clipe foi gerado. O Ollama não retornou cortes válidos. Tente um modelo maior (ex.: llama3.1 8B) e confira no terminal se há erros de JSON.';
+                        }
+                    }
+                });
+            }, 2000);
+        } catch (err) {
+            statusText.textContent = 'Erro';
+            errorText.textContent = err.message;
+            errorText.style.display = 'block';
+            jobStateText.textContent = 'Nenhum job em execução.';
+            btnRun.disabled = false;
+        }
+    });
+})();
+</script>
+}

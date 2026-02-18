@@ -24,6 +24,9 @@ public class VideoClipPipeline : IVideoClipPipeline
     private const string StageEngagingMoments = "EngagingMoments";
     private const string StageClipGeneration = "ClipGeneration";
 
+    /// <summary>Duração mínima em segundos para um corte ser aceito (evita clipes curtos demais).</summary>
+    private const double MinClipDurationSeconds = 30;
+
     private static readonly Func<ILogger, string, string?, IDisposable?> BeginPipelineScope =
         LoggerMessage.DefineScope<string, string?>("Pipeline run: LocalVideoPath={LocalVideoPath}, SourceUrl={SourceUrl}");
 
@@ -104,16 +107,26 @@ public class VideoClipPipeline : IVideoClipPipeline
                     };
                 }
 
-                var (cuts, engagingMs) = await RunEngagingMomentsWithLoggingAsync(transcript, cancellationToken).ConfigureAwait(false);
+                var (cutsRaw, engagingMs) = await RunEngagingMomentsWithLoggingAsync(transcript, cancellationToken).ConfigureAwait(false);
                 stageTimings.Add(new PipelineStageTiming(StageEngagingMoments, engagingMs));
 
+                var cuts = cutsRaw.Where(c => (c.EndSeconds - c.StartSeconds) >= MinClipDurationSeconds).ToList();
+                if (cuts.Count < cutsRaw.Count)
+                {
+                    _logger.LogWarning("Filtered out {Dropped} cuts shorter than {MinSeconds}s (kept {Kept})", cutsRaw.Count - cuts.Count, MinClipDurationSeconds, cuts.Count);
+                    if (cuts.Count == 0 && cutsRaw.Count > 0 && transcript.Segments != null && transcript.Segments.Count > 0)
+                    {
+                        cuts = ExpandCutsToMinDuration(cutsRaw, transcript.Segments, MinClipDurationSeconds);
+                        _logger.LogInformation("Expanded {Count} short cuts to at least {MinSeconds}s using transcript boundaries", cuts.Count, MinClipDurationSeconds);
+                    }
+                }
+
+                cuts = RemoveOverlappingCuts(cuts, MinClipDurationSeconds);
                 if (cuts.Count == 0)
                 {
                     _logger.LogInformation("No engaging moments detected. Returning success with zero clips. StageTimings: Transcription={TranscriptionMs}ms, EngagingMoments={EngagingMs}ms",
                         transcriptionMs, engagingMs);
                     pipelineStopwatch.Stop();
-                    _logger.LogInformation("Pipeline completed. Success={Success}, TotalDurationMs={DurationMs}, ClipsGenerated={ClipsGenerated}",
-                        true, pipelineStopwatch.ElapsedMilliseconds, 0);
                     job?.MarkCompleted();
                     return new PipelineResult
                     {
@@ -250,6 +263,69 @@ public class VideoClipPipeline : IVideoClipPipeline
             _logger.LogError(ex, "Step EngagingMoments threw. DurationMs={DurationMs}", sw.ElapsedMilliseconds);
             throw;
         }
+    }
+
+    /// <summary>Remove sobreposição entre cortes: ordena por início e garante que cada corte comece onde o anterior termina (ou descarta se ficar curto demais).</summary>
+    private List<VideoCut> RemoveOverlappingCuts(List<VideoCut> cuts, double minDuration)
+    {
+        if (cuts == null || cuts.Count <= 1) return cuts ?? new List<VideoCut>();
+        var sorted = cuts.OrderBy(c => c.StartSeconds).ToList();
+        var result = new List<VideoCut> { sorted[0] };
+        for (int i = 1; i < sorted.Count; i++)
+        {
+            var prev = result[result.Count - 1];
+            var curr = sorted[i];
+            double start = curr.StartSeconds;
+            if (start < prev.EndSeconds)
+                start = prev.EndSeconds;
+            double end = curr.EndSeconds;
+            if (end - start >= minDuration)
+                result.Add(new VideoCut { StartSeconds = start, EndSeconds = end, Description = curr.Description });
+        }
+        if (result.Count < sorted.Count)
+            _logger.LogInformation("Removed {Dropped} overlapping or too-close cuts (kept {Kept} non-overlapping)", sorted.Count - result.Count, result.Count);
+        return result;
+    }
+
+    /// <summary>Expande cortes curtos até pelo menos minDuration segundos usando fronteiras dos segmentos da transcrição.</summary>
+    private static List<VideoCut> ExpandCutsToMinDuration(IReadOnlyList<VideoCut> cutsRaw, IReadOnlyList<TranscriptSegment> segments, double minDuration)
+    {
+        if (segments == null || segments.Count == 0) return cutsRaw.ToList();
+        var ordered = segments.OrderBy(s => s.StartTimeSeconds).ToList();
+        var result = new List<VideoCut>();
+        foreach (var cut in cutsRaw)
+        {
+            double start = cut.StartSeconds;
+            double end = cut.EndSeconds;
+            int i = 0;
+            while (i < ordered.Count && ordered[i].EndTimeSeconds <= start) i++;
+            int j = i;
+            while (j < ordered.Count && ordered[j].StartTimeSeconds < end) j++;
+            if (j > i)
+            {
+                double newStart = ordered[i].StartTimeSeconds;
+                double newEnd = ordered[j - 1].EndTimeSeconds;
+                while (newEnd - newStart < minDuration)
+                {
+                    if (j < ordered.Count)
+                    {
+                        newEnd = ordered[j].EndTimeSeconds;
+                        j++;
+                    }
+                    else if (i > 0)
+                    {
+                        i--;
+                        newStart = ordered[i].StartTimeSeconds;
+                    }
+                    else break;
+                }
+                if (newEnd - newStart > 120)
+                    newEnd = newStart + 120;
+                if (newEnd - newStart >= 5)
+                    result.Add(new VideoCut { StartSeconds = newStart, EndSeconds = newEnd, Description = cut.Description });
+            }
+        }
+        return result;
     }
 
     private async Task<(List<GeneratedClip> Clips, long ElapsedMilliseconds)> RunClipGenerationWithLoggingAsync(

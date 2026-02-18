@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\VideoCuts.Core\VideoCuts.Core.csproj" />
+    <ProjectReference Include="..\VideoCuts.Infrastructure\VideoCuts.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>VideoCuts.Web</RootNamespace>
+  </PropertyGroup>
+
+</Project>

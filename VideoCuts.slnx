@@ -3,6 +3,10 @@
     <Project Path="src/VideoCuts.Cli/VideoCuts.Cli.csproj" />
     <Project Path="src/VideoCuts.Core/VideoCuts.Core.csproj" />
     <Project Path="src/VideoCuts.Infrastructure/VideoCuts.Infrastructure.csproj" />
+    <Project Path="src/VideoCuts.Web/VideoCuts.Web.csproj" />
     <Project Path="src/VideoCuts.Worker/VideoCuts.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VideoCuts.Tests/VideoCuts.Tests.csproj" />
   </Folder>
 </Solution>
