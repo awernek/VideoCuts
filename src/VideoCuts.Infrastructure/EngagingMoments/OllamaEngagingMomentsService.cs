@@ -110,8 +110,12 @@ public class OllamaEngagingMomentsService : IEngagingMomentsService
         return Array.Empty<VideoCut>();
     }
 
+    private const int MaxTranscriptLength = 28_000;
+
     private static string BuildPrompt(string transcriptText)
     {
+        if (transcriptText.Length > MaxTranscriptLength)
+            transcriptText = transcriptText[..MaxTranscriptLength] + "\n\n[Transcript truncated for length. Use timestamps above to suggest engaging moments.]";
         return """
             You are an expert at identifying the most engaging moments in long-form content for short-form clips (e.g. TikTok, Reels, Shorts).
             Given a transcript (optionally with timestamps), return a JSON object with exactly one property "cuts" that is an array of objects.
@@ -126,7 +130,10 @@ public class OllamaEngagingMomentsService : IEngagingMomentsService
     {
         var cuts = EngagingMomentsJsonParser.Parse(responseText);
         if (cuts.Count == 0 && !string.IsNullOrWhiteSpace(responseText))
-            _logger.LogWarning("Ollama returned no valid cuts (empty or invalid JSON).");
+        {
+            var preview = responseText.Length > 600 ? responseText.AsSpan(0, 600).ToString() + "..." : responseText;
+            _logger.LogWarning("Ollama returned no valid cuts (empty or invalid JSON). Preview: {Preview}", preview);
+        }
         return cuts;
     }
 

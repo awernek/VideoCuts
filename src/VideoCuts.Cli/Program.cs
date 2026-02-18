@@ -15,16 +15,30 @@ using VideoCuts.Infrastructure.Pipeline;
 using VideoCuts.Infrastructure.Transcription;
 using VideoCuts.Infrastructure.VideoDownload;
 using VideoCuts.Infrastructure.VideoEditing;
+using FFMpegCore;
 
 // Composition root
 static IVideoEditor CreateVideoEditor() => new FfmpegVideoEditor();
 
 static IConfiguration BuildConfiguration()
 {
+    // Pasta do executável (onde appsettings.json é copiado ao publicar)
+    var basePath = AppContext.BaseDirectory;
     return new ConfigurationBuilder()
-        .SetBasePath(Directory.GetCurrentDirectory())
+        .SetBasePath(basePath)
         .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
         .Build();
+}
+
+/// <summary>Configura o FFMpegCore para usar a pasta do FFmpeg informada no appsettings (FFmpeg:BinaryFolder), se definida.</summary>
+static void EnsureFFmpegConfigured(IConfiguration configuration)
+{
+    var folder = configuration["FFmpeg:BinaryFolder"];
+    if (string.IsNullOrWhiteSpace(folder)) return;
+    folder = folder.Trim();
+    if (!Directory.Exists(folder))
+        throw new InvalidOperationException($"Pasta do FFmpeg não encontrada: {folder}. Defina FFmpeg:BinaryFolder no appsettings.json (ex.: C:\\ffmpeg\\bin) ou adicione ffmpeg ao PATH.");
+    GlobalFFOptions.Configure(new FFOptions { BinaryFolder = folder });
 }
 
 static IOptions<VideoCutsSettings> BuildVideoCutsOptions(IConfiguration configuration)
@@ -61,22 +75,25 @@ static bool IsYouTubeUrl(string? url)
     catch { return false; }
 }
 
-static IVideoClipPipeline CreatePipeline(bool useUrl, string? sourceUrl, EngagingMomentsMode engagingMode, ILoggerFactory loggerFactory, IConfiguration configuration, IOptions<VideoCutsSettings>? videoCutsOptions = null)
+static IVideoClipPipeline CreatePipeline(bool useUrl, string? sourceUrl, EngagingMomentsMode engagingMode, bool useLocalWhisper, string? whisperModelPath, ILoggerFactory loggerFactory, IConfiguration configuration, IOptions<VideoCutsSettings>? videoCutsOptions = null)
 {
     string? apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-    if (string.IsNullOrWhiteSpace(apiKey))
-        throw new InvalidOperationException("Defina a variável de ambiente OPENAI_API_KEY para usar o pipeline (transcrição Whisper).");
+    bool needApiKey = !useLocalWhisper || engagingMode == EngagingMomentsMode.OpenAi || engagingMode == EngagingMomentsMode.OllamaThenOpenAi;
+    if (needApiKey && string.IsNullOrWhiteSpace(apiKey))
+        throw new InvalidOperationException("Defina a variável de ambiente OPENAI_API_KEY (transcrição Whisper API ou cortes OpenAI). Use --whisper-local + --ollama para rodar 100% local.");
 
-    var transcription = new OpenAiWhisperTranscriptionService(apiKey);
+    ITranscriptionService transcription = useLocalWhisper
+        ? new WhisperTranscriptionService(whisperModelPath!)
+        : new OpenAiWhisperTranscriptionService(apiKey!);
     IEngagingMomentsService engagingMoments = engagingMode switch
     {
-        EngagingMomentsMode.OpenAi => new LlmEngagingMomentsService(apiKey),
+        EngagingMomentsMode.OpenAi => new LlmEngagingMomentsService(apiKey!),
         EngagingMomentsMode.Ollama => new OllamaEngagingMomentsService(new HttpClient(), BuildOllamaOptions(configuration), loggerFactory.CreateLogger<OllamaEngagingMomentsService>()),
         EngagingMomentsMode.OllamaThenOpenAi => new FallbackEngagingMomentsService(
             new OllamaEngagingMomentsService(new HttpClient(), BuildOllamaOptions(configuration), loggerFactory.CreateLogger<OllamaEngagingMomentsService>()),
-            new LlmEngagingMomentsService(apiKey),
+            new LlmEngagingMomentsService(apiKey!),
             loggerFactory.CreateLogger<FallbackEngagingMomentsService>()),
-        _ => new LlmEngagingMomentsService(apiKey)
+        _ => new LlmEngagingMomentsService(apiKey!)
     };
     var editor = CreateVideoEditor();
     IVideoDownloader? downloader = useUrl
@@ -96,6 +113,8 @@ if (args.Length > 0 && args[0].Equals("pipeline", StringComparison.OrdinalIgnore
     bool convertToVertical = true;
     bool useOllama = false;
     bool useOllamaFallback = false;
+    bool useWhisperLocal = false;
+    string? whisperModelPath = null;
 
     for (int i = 1; i < args.Length; i++)
     {
@@ -125,6 +144,12 @@ if (args.Length > 0 && args[0].Equals("pipeline", StringComparison.OrdinalIgnore
             case "--ollama-fallback":
                 useOllamaFallback = true;
                 break;
+            case "--whisper-local":
+                useWhisperLocal = true;
+                break;
+            case "--whisper-model":
+                if (i + 1 < args.Length) whisperModelPath = args[++i];
+                break;
         }
     }
 
@@ -133,18 +158,32 @@ if (args.Length > 0 && args[0].Equals("pipeline", StringComparison.OrdinalIgnore
     if (string.IsNullOrWhiteSpace(inputPath) && string.IsNullOrWhiteSpace(url))
     {
         Console.WriteLine("Uso (pipeline): VideoCuts.Cli pipeline --input <arquivo> | --url <url> [--output-dir <pasta>] [--max-clips N] [--no-vertical]");
+        Console.WriteLine("                [--whisper-local] [--whisper-model <caminho>] [--ollama] [--ollama-fallback]");
         Console.WriteLine();
         Console.WriteLine("  --input, -i    Caminho do vídeo no disco.");
-        Console.WriteLine("  --url, -u      URL direta do vídeo (HTTP/HTTPS). O vídeo será baixado antes.");
-        Console.WriteLine("  --output-dir  Pasta dos clipes gerados (padrão: mesma do vídeo).");
+        Console.WriteLine("  --url, -u      URL do vídeo (YouTube ou HTTP). O vídeo será baixado antes.");
+        Console.WriteLine("  --output-dir   Pasta dos clipes gerados (padrão: mesma do vídeo).");
         Console.WriteLine("  --max-clips    Número máximo de clipes (opcional).");
-        Console.WriteLine("  --no-vertical     Não converter clipes para 9:16.");
-        Console.WriteLine("  --ollama          Usar apenas Ollama (localhost) para cortes.");
-        Console.WriteLine("  --ollama-fallback Primeiro Ollama; em falha, usa OpenAI.");
-        Console.WriteLine();
-        Console.WriteLine("Requer: OPENAI_API_KEY (transcrição Whisper). Cortes: OpenAI (padrão), ou --ollama / --ollama-fallback.");
+        Console.WriteLine("  --no-vertical  Não converter clipes para 9:16.");
+        Console.WriteLine("  --whisper-local     Transcrição local (Whisper.net). Requer --whisper-model ou Whisper:ModelPath no appsettings.");
+        Console.WriteLine("  --whisper-model     Caminho do modelo Whisper (ex.: ggml-base.bin). Use com --whisper-local.");
+        Console.WriteLine("  --ollama            Cortes via Ollama (localhost). Com --whisper-local = 100% local, sem OPENAI_API_KEY.");
+        Console.WriteLine("  --ollama-fallback   Ollama primeiro; em falha, OpenAI (exige OPENAI_API_KEY).");
         return 1;
     }
+
+    var configuration = BuildConfiguration();
+    EnsureFFmpegConfigured(configuration);
+    if (useWhisperLocal)
+    {
+        whisperModelPath = string.IsNullOrWhiteSpace(whisperModelPath) ? configuration["Whisper:ModelPath"] : whisperModelPath;
+        if (string.IsNullOrWhiteSpace(whisperModelPath) || !File.Exists(whisperModelPath))
+        {
+            Console.WriteLine("Erro: com --whisper-local informe --whisper-model <caminho> ou defina Whisper:ModelPath no appsettings.json. O arquivo do modelo deve existir (ex.: ggml-base.bin).");
+            return 1;
+        }
+    }
+    string? resolvedWhisperPath = useWhisperLocal ? whisperModelPath : null;
 
     if (!string.IsNullOrWhiteSpace(inputPath) && !File.Exists(inputPath))
     {
@@ -152,7 +191,6 @@ if (args.Length > 0 && args[0].Equals("pipeline", StringComparison.OrdinalIgnore
         return 1;
     }
 
-    var configuration = BuildConfiguration();
     var videoCutsOptions = BuildVideoCutsOptions(configuration);
     var settings = videoCutsOptions.Value;
 
@@ -170,8 +208,10 @@ if (args.Length > 0 && args[0].Equals("pipeline", StringComparison.OrdinalIgnore
     try
     {
         using var loggerFactory = CreateLoggerFactory();
-        var pipeline = CreatePipeline(useUrl: !string.IsNullOrWhiteSpace(url), sourceUrl: url, engagingMode, loggerFactory, configuration, videoCutsOptions);
-        Console.WriteLine(engagingMode == EngagingMomentsMode.OllamaThenOpenAi
+        var pipeline = CreatePipeline(useUrl: !string.IsNullOrWhiteSpace(url), sourceUrl: url, engagingMode, useLocalWhisper: useWhisperLocal, whisperModelPath: resolvedWhisperPath, loggerFactory, configuration, videoCutsOptions);
+        Console.WriteLine(useWhisperLocal
+            ? "Pipeline: transcrição local (Whisper) → " + (engagingMode == EngagingMomentsMode.Ollama ? "Ollama (cortes)" : engagingMode == EngagingMomentsMode.OllamaThenOpenAi ? "Ollama (cortes, fallback OpenAI)" : "LLM (cortes)") + " → geração de clipes..."
+            : engagingMode == EngagingMomentsMode.OllamaThenOpenAi
             ? "Pipeline: transcrição → Ollama (cortes, fallback OpenAI) → geração de clipes..."
             : engagingMode == EngagingMomentsMode.Ollama
                 ? "Pipeline: transcrição → Ollama (cortes) → geração de clipes..."
@@ -203,7 +243,7 @@ if (args.Length > 0 && args[0].Equals("batch", StringComparison.OrdinalIgnoreCas
 {
     if (args.Length < 2)
     {
-        Console.WriteLine("Uso: VideoCuts.Cli batch <pasta> [--output-dir <pasta>] [--max-clips N] [--no-vertical] [--ollama] [--ollama-fallback] [--json]");
+        Console.WriteLine("Uso: VideoCuts.Cli batch <pasta> [--output-dir <pasta>] [--max-clips N] [--no-vertical] [--whisper-local] [--whisper-model <caminho>] [--ollama] [--ollama-fallback] [--json]");
         Console.WriteLine();
         Console.WriteLine("Processa todos os vídeos da pasta (transcrição → cortes → clipes). Falhas por arquivo não interrompem o lote.");
         return 1;
@@ -221,6 +261,8 @@ if (args.Length > 0 && args[0].Equals("batch", StringComparison.OrdinalIgnoreCas
     bool convertToVertical = true;
     bool useOllama = false;
     bool useOllamaFallback = false;
+    bool useWhisperLocal = false;
+    string? whisperModelPath = null;
     bool outputJson = false;
 
     for (int i = 2; i < args.Length; i++)
@@ -243,10 +285,30 @@ if (args.Length > 0 && args[0].Equals("batch", StringComparison.OrdinalIgnoreCas
             case "--ollama-fallback":
                 useOllamaFallback = true;
                 break;
+            case "--whisper-local":
+                useWhisperLocal = true;
+                break;
+            case "--whisper-model":
+                if (i + 1 < args.Length) whisperModelPath = args[++i];
+                break;
             case "--json":
                 outputJson = true;
                 break;
         }
+    }
+
+    var configuration = BuildConfiguration();
+    EnsureFFmpegConfigured(configuration);
+    string? batchWhisperPath = null;
+    if (useWhisperLocal)
+    {
+        whisperModelPath = string.IsNullOrWhiteSpace(whisperModelPath) ? configuration["Whisper:ModelPath"] : whisperModelPath;
+        if (string.IsNullOrWhiteSpace(whisperModelPath) || !File.Exists(whisperModelPath))
+        {
+            Console.WriteLine("Erro: com --whisper-local informe --whisper-model <caminho> ou defina Whisper:ModelPath no appsettings.json.");
+            return 1;
+        }
+        batchWhisperPath = whisperModelPath;
     }
 
     var videoExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv" };
@@ -261,7 +323,6 @@ if (args.Length > 0 && args[0].Equals("batch", StringComparison.OrdinalIgnoreCas
         return 0;
     }
 
-    var configuration = BuildConfiguration();
     var videoCutsOptions = BuildVideoCutsOptions(configuration);
     var settings = videoCutsOptions.Value;
     EngagingMomentsMode engagingMode = useOllamaFallback ? EngagingMomentsMode.OllamaThenOpenAi : (useOllama ? EngagingMomentsMode.Ollama : EngagingMomentsMode.OpenAi);
@@ -270,7 +331,7 @@ if (args.Length > 0 && args[0].Equals("batch", StringComparison.OrdinalIgnoreCas
 
     using (var loggerFactory = CreateLoggerFactory())
     {
-        var pipeline = CreatePipeline(useUrl: false, sourceUrl: null, engagingMode, loggerFactory, configuration, videoCutsOptions);
+        var pipeline = CreatePipeline(useUrl: false, sourceUrl: null, engagingMode, useLocalWhisper: useWhisperLocal, whisperModelPath: batchWhisperPath, loggerFactory, configuration, videoCutsOptions);
 
         for (int i = 0; i < files.Count; i++)
         {
