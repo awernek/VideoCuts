@@ -25,4 +25,7 @@ public record PipelineResult
 
     /// <summary>Mensagem de erro quando <see cref="Success"/> é false.</summary>
     public string? ErrorMessage { get; init; }
+
+    /// <summary>Tempos de execução por etapa (Transcription, EngagingMoments, ClipGeneration), quando disponíveis.</summary>
+    public IReadOnlyList<PipelineStageTiming>? StageTimings { get; init; }
 }

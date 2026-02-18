@@ -11,6 +11,7 @@ public class FfmpegVideoEditor : IVideoEditor
 {
     private const int VerticalWidth = 1080;
     private const int VerticalHeight = 1920;
+    private static readonly string VerticalFilter = $"scale={VerticalWidth}:{VerticalHeight}:force_original_aspect_ratio=decrease,pad={VerticalWidth}:{VerticalHeight}:(ow-iw)/2:(oh-ih)/2";
 
     /// <inheritdoc />
     public async Task<EditResult> EditAsync(
@@ -101,13 +102,11 @@ public class FfmpegVideoEditor : IVideoEditor
 
     private async Task ProcessTrimAndVerticalAsync(string inputPath, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken)
     {
-        const string verticalFilter = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2";
-
         await FFMpegArguments
             .FromFileInput(inputPath, true, opts => opts.Seek(start))
             .OutputToFile(outputPath, true, opts => opts
                 .WithDuration(duration)
-                .WithCustomArgument($"-vf \"{verticalFilter}\""))
+                .WithCustomArgument($"-vf \"{VerticalFilter}\""))
             .ProcessAsynchronously(true);
     }
 
@@ -138,10 +137,9 @@ public class FfmpegVideoEditor : IVideoEditor
             {
                 string concatPath = Path.Combine(tempDir, "concat.mp4");
                 await Task.Run(() => FFMpeg.Join(concatPath, tempFiles.ToArray()), cancellationToken);
-                const string verticalFilter = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2";
                 await FFMpegArguments
                     .FromFileInput(concatPath, true)
-                    .OutputToFile(outputPath, true, opts => opts.WithCustomArgument($"-vf \"{verticalFilter}\""))
+                    .OutputToFile(outputPath, true, opts => opts.WithCustomArgument($"-vf \"{VerticalFilter}\""))
                     .ProcessAsynchronously(true);
             }
             else

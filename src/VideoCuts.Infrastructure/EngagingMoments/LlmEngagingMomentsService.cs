@@ -98,23 +98,7 @@ public class LlmEngagingMomentsService : IEngagingMomentsService
         if (string.IsNullOrWhiteSpace(content))
             return Array.Empty<VideoCut>();
 
-        content = content.Trim();
-        if (content.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
-            content = content.Replace("```json", "").Replace("```", "").Trim();
-
-        var cutsResponse = JsonSerializer.Deserialize<CutsResponse>(content, JsonOptions);
-        if (cutsResponse?.Cuts == null || cutsResponse.Cuts.Length == 0)
-            return Array.Empty<VideoCut>();
-
-        return cutsResponse.Cuts
-            .Where(c => c.Start >= 0 && c.End > c.Start)
-            .Select(c => new VideoCut
-            {
-                StartSeconds = c.Start,
-                EndSeconds = c.End,
-                Description = c.Description
-            })
-            .ToList();
+        return EngagingMomentsJsonParser.Parse(content);
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -161,23 +145,5 @@ public class LlmEngagingMomentsService : IEngagingMomentsService
     {
         [JsonPropertyName("message")]
         public ChatMessage? Message { get; set; }
-    }
-
-    private sealed class CutsResponse
-    {
-        [JsonPropertyName("cuts")]
-        public CutItem[]? Cuts { get; set; }
-    }
-
-    private sealed class CutItem
-    {
-        [JsonPropertyName("start")]
-        public double Start { get; set; }
-
-        [JsonPropertyName("end")]
-        public double End { get; set; }
-
-        [JsonPropertyName("description")]
-        public string? Description { get; set; }
     }
 }

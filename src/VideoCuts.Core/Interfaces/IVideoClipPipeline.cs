@@ -1,3 +1,4 @@
+using VideoCuts.Core.Models.Job;
 using VideoCuts.Core.Models.Pipeline;
 
 namespace VideoCuts.Core.Interfaces;
@@ -13,8 +14,10 @@ public interface IVideoClipPipeline
     /// </summary>
     /// <param name="request">Entrada (URL e/ou path local, opções).</param>
     /// <param name="cancellationToken">Token de cancelamento.</param>
+    /// <param name="job">Job opcional para rastrear status (Pending → Processing → Completed | Failed). Quando informado, o pipeline atualiza o status durante a execução.</param>
     /// <returns>Resultado com transcrição, cortes e clipes gerados.</returns>
     Task<PipelineResult> RunAsync(
         PipelineRequest request,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        VideoProcessingJob? job = null);
 }
